@@ -1,10 +1,14 @@
 import express from 'express';
 import cors from 'cors';
-import { spawn } from 'child_process';
+import { spawn, exec } from 'child_process';
 import nodemailer from 'nodemailer';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import dotenv from 'dotenv'; // 新增：引入 dotenv
+
+// 讀取 .env 設定
+dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,11 +33,11 @@ if (!fs.existsSync(PROJECTS_FILE)) {
     fs.writeFileSync(PROJECTS_FILE, JSON.stringify(initialProjects, null, 2));
 }
 
-const jobs = {};
+let jobs = {}; 
 if (fs.existsSync(JOBS_FILE)) {
     try {
         const savedJobs = JSON.parse(fs.readFileSync(JOBS_FILE));
-        Object.assign(jobs, savedJobs);
+        jobs = savedJobs; 
         Object.values(jobs).forEach(job => {
             if (job.status === 'processing') {
                 job.status = 'failed';
@@ -47,17 +51,54 @@ if (fs.existsSync(JOBS_FILE)) {
 
 const activeProcesses = {};
 
-const transporter = nodemailer.createTransport({
-    service: 'gmail',
+// --- Email 設定 (改為讀取環境變數) ---
+// 如果 .env 沒設定，會嘗試 fallback 到預設值或報錯
+const smtpConfig = {
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: parseInt(process.env.SMTP_PORT || '587'),
+    secure: process.env.SMTP_SECURE === 'true', // true for 465, false for other ports
     auth: {
-        user: 'YOUR_EMAIL@gmail.com',
-        pass: 'YOUR_APP_PASSWORD'
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
     }
-});
+};
+
+// 只有在有設定帳號密碼時才啟用 auth
+if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.warn("⚠️  警告: 未設定 SMTP_USER 或 SMTP_PASS，郵件功能可能無法運作。請檢查 .env 檔案。");
+}
+
+const transporter = nodemailer.createTransport(smtpConfig);
 
 function getProjects() { return JSON.parse(fs.readFileSync(PROJECTS_FILE)); }
 function saveProjects(data) { fs.writeFileSync(PROJECTS_FILE, JSON.stringify(data, null, 2)); }
 function saveJobs() { fs.writeFileSync(JOBS_FILE, JSON.stringify(jobs, null, 2)); }
+
+// --- Helper: 取得硬碟空間 ---
+function getDiskUsage(checkPath) {
+    return new Promise((resolve) => {
+        exec(`df -k "${checkPath}"`, (error, stdout) => {
+            if (error) {
+                resolve({ total: 0, used: 0, available: 0, percent: 0 });
+                return;
+            }
+            try {
+                const lines = stdout.trim().split('\n');
+                const lastLine = lines[lines.length - 1];
+                const parts = lastLine.replace(/\s+/g, ' ').split(' ');
+                
+                const total = parseInt(parts[1]) * 1024;
+                const used = parseInt(parts[2]) * 1024;
+                const available = parseInt(parts[3]) * 1024;
+                const percent = parts[4]; 
+                
+                resolve({ total, used, available, percent });
+            } catch (e) {
+                resolve({ total: 0, used: 0, available: 0, percent: 0 });
+            }
+        });
+    });
+}
 
 // --- APIs ---
 app.get('/api/projects', (req, res) => res.json(getProjects()));
@@ -113,6 +154,73 @@ app.post('/api/job/:id/cancel', (req, res) => {
     }
 });
 
+app.get('/api/system/status', async (req, res) => {
+    const buildDir = path.join(__dirname, 'builds');
+    if (!fs.existsSync(buildDir)) fs.mkdirSync(buildDir, { recursive: true });
+    const disk = await getDiskUsage(buildDir);
+    res.json({ disk });
+});
+
+app.post('/api/cleanup', (req, res) => {
+    const { type } = req.body; 
+    const now = new Date();
+    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+    
+    const buildDir = path.join(__dirname, 'builds');
+    let deletedCount = 0;
+
+    const newJobs = {};
+    Object.keys(jobs).forEach(id => {
+        const job = jobs[id];
+        const jobTime = new Date(job.startTime);
+        let shouldDelete = false;
+
+        if (type === 'all') {
+            if (job.status !== 'processing') shouldDelete = true;
+        } else if (type === 'old') {
+            if ((now - jobTime) > SEVEN_DAYS_MS && job.status !== 'processing') {
+                shouldDelete = true;
+            }
+        }
+
+        if (!shouldDelete) {
+            newJobs[id] = job;
+        } else {
+            deletedCount++;
+        }
+    });
+    
+    jobs = newJobs; 
+    saveJobs();
+
+    if (fs.existsSync(buildDir)) {
+        const items = fs.readdirSync(buildDir);
+        items.forEach(item => {
+            const itemPath = path.join(buildDir, item);
+            try {
+                const stats = fs.statSync(itemPath);
+                let shouldRemove = false;
+
+                if (type === 'all') {
+                    shouldRemove = true;
+                } else if (type === 'old') {
+                    if ((now - stats.mtime) > SEVEN_DAYS_MS) {
+                        shouldRemove = true;
+                    }
+                }
+
+                if (shouldRemove) {
+                    fs.rmSync(itemPath, { recursive: true, force: true });
+                }
+            } catch (err) {
+                console.error(`Failed to delete ${item}:`, err);
+            }
+        });
+    }
+
+    res.json({ success: true, message: `Cleaned up ${deletedCount} job records.` });
+});
+
 // --- 核心邏輯 ---
 async function runBuildProcess(jobId, projectName, commands, emails) {
     const job = jobs[jobId];
@@ -127,7 +235,7 @@ async function runBuildProcess(jobId, projectName, commands, emails) {
     const log = (msg) => {
         const time = new Date().toLocaleTimeString();
         const line = `[${time}] ${msg}`;
-        job.logs.push(line);
+        if (jobs[jobId]) jobs[jobId].logs.push(line); 
     };
 
     try {
@@ -138,7 +246,7 @@ async function runBuildProcess(jobId, projectName, commands, emails) {
         let currentCwd = buildDir;
 
         for (const command of commands) {
-            if (job.status === 'cancelled') throw new Error('Build cancelled by user');
+            if (!jobs[jobId] || jobs[jobId].status === 'cancelled') throw new Error('Build cancelled by user');
             log(`> ${command}`);
             
             const trimmedCmd = command.trim();
@@ -146,12 +254,10 @@ async function runBuildProcess(jobId, projectName, commands, emails) {
                 const targetPath = trimmedCmd.substring(3).trim();
                 const newPath = path.resolve(currentCwd, targetPath);
                 
-                // --- DEBUG: 檢查目錄是否存在 ---
                 if (fs.existsSync(newPath) && fs.lstatSync(newPath).isDirectory()) {
                     currentCwd = newPath;
                     log(`[System] Changed directory to: ${currentCwd}`);
                 } else {
-                    // 如果失敗，列出當前目錄下的檔案，幫助除錯
                     log(`[Debug Error] Target path not found: ${newPath}`);
                     log(`[Debug Error] Current dir (${currentCwd}) contains:`);
                     try {
@@ -167,19 +273,21 @@ async function runBuildProcess(jobId, projectName, commands, emails) {
             }
         }
 
-        if (job.status !== 'cancelled') {
-            job.status = 'completed';
+        if (jobs[jobId] && jobs[jobId].status !== 'cancelled') {
+            jobs[jobId].status = 'completed';
             log(`[System] Build Completed Successfully.`);
             saveJobs();
-            if (emails?.length) sendEmail(emails, `[SUCCESS] ${projectName} #${jobId}`, job.logs.join('\n'));
+            if (emails?.length) sendEmail(emails, `[SUCCESS] ${projectName} #${jobId}`, jobs[jobId].logs.join('\n'));
         }
     } catch (error) {
-        if (job.status !== 'cancelled') {
-            job.status = 'failed';
-            log(`[Error] Build Failed: ${error.message}`);
-            if (emails?.length) sendEmail(emails, `[FAILED] ${projectName} #${jobId}`, job.logs.join('\n'));
+        if (jobs[jobId]) {
+            if (jobs[jobId].status !== 'cancelled') {
+                jobs[jobId].status = 'failed';
+                log(`[Error] Build Failed: ${error.message}`);
+                if (emails?.length) sendEmail(emails, `[FAILED] ${projectName} #${jobId}`, jobs[jobId].logs.join('\n'));
+            }
+            saveJobs();
         }
-        saveJobs();
     } finally {
         delete activeProcesses[jobId];
     }
@@ -204,14 +312,19 @@ function executeCommand(command, cwd, logFn, jobId) {
 }
 
 async function sendEmail(to, subject, content) {
+    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+        console.log('[Mock Email] Skipping email because SMTP credentials are missing.');
+        return;
+    }
     try {
         await transporter.sendMail({
-            from: '"Build System" <noreply@buildserver.com>',
+            from: `"Build System" <${process.env.SMTP_USER}>`, // 使用 .env 設定的 Email
             to: to.join(', '),
             subject: subject,
             text: `Logs attached.`,
             attachments: [{ filename: 'build.log', content: content }]
         });
+        console.log(`[System] Email sent to ${to.join(', ')}`);
     } catch (err) { console.error('Email error:', err); }
 }
 
