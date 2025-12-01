@@ -1,0 +1,27 @@
+[
+  {
+    "id": "proj_default_1",
+    "name": "Example Project",
+    "description": "範例專案",
+    "commands": [
+      "echo \"Hello World\"",
+      "sleep 2",
+      "echo \"Done\""
+    ]
+  },
+  {
+    "id": "proj_1764574092756",
+    "name": "ast2600",
+    "description": "2600evb",
+    "commands": [
+      "git clone --recurse-submodules https://git.ami.com.tw/core/lts/spx-13/evb/ast2600evb.git --branch LTS-v13",
+      "pwd",
+      "cd ast2600evb",
+      "pwd",
+      "git submodule foreach git checkout LTS-v13    ",
+      "git checkout LTS-v13",
+      "git pull origin LTS-v13",
+      "git spx buildsrc configs/ast2600evb.PRJ packages/ workspace_ast2600evb"
+    ]
+  }
+]
