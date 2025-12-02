@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==========================================
-# Build Verification System - 管理腳本
+# Build Verification System - 管理腳本 (v1.2)
 # ==========================================
 
 # 定義顏色
@@ -24,17 +24,34 @@ mkdir -p $PID_DIR
 # 輔助函數
 # ------------------------------------------
 
-check_port() {
-    # 檢查 Port 3001 或 5173 是否被佔用
+# 強制清理幽靈程序 (Ghost Processes)
+force_cleanup() {
+    echo -e "${YELLOW}正在檢查並清理佔用 Port 的幽靈程序...${NC}"
+    
+    # 檢查 Port 3001 (後端)
     if lsof -Pi :3001 -sTCP:LISTEN -t >/dev/null ; then
-        echo -e "${YELLOW}警告: Port 3001 (後端) 正在被使用中。${NC}"
-        return 1
+        echo -e "${RED}發現 Port 3001 被佔用 (可能是舊的 Server)，正在強制終止...${NC}"
+        # 嘗試使用 fuser 殺死程序，如果沒有 fuser 則嘗試 kill PID
+        fuser -k 3001/tcp >/dev/null 2>&1 || kill -9 $(lsof -t -i:3001) 2>/dev/null
     fi
+
+    # 檢查 Port 5173 (前端)
     if lsof -Pi :5173 -sTCP:LISTEN -t >/dev/null ; then
-        echo -e "${YELLOW}警告: Port 5173 (前端) 正在被使用中。${NC}"
-        return 1
+        echo -e "${RED}發現 Port 5173 被佔用 (可能是舊的 Vite)，正在強制終止...${NC}"
+        fuser -k 5173/tcp >/dev/null 2>&1 || kill -9 $(lsof -t -i:5173) 2>/dev/null
     fi
-    return 0
+    
+    # 等待一秒讓系統釋放資源
+    sleep 1
+    
+    # 再次確認
+    if lsof -Pi :3001 -sTCP:LISTEN -t >/dev/null || lsof -Pi :5173 -sTCP:LISTEN -t >/dev/null ; then
+         echo -e "${RED}警告：無法自動清除所有程序，可能需要 sudo 權限。${NC}"
+         echo -e "請手動執行: sudo fuser -k 3001/tcp && sudo fuser -k 5173/tcp"
+         # 這裡不強制退出，嘗試繼續執行
+    else
+         echo -e "${GREEN}環境檢查完畢，Port 3001 與 5173 皆可用。${NC}"
+    fi
 }
 
 stop_dev() {
@@ -54,6 +71,9 @@ stop_dev() {
         echo "已停止前端 Vite Server"
     fi
     
+    # 額外執行一次強制清理，確保乾淨
+    force_cleanup
+    
     echo -e "${GREEN}開發模式已完全停止。${NC}"
 }
 
@@ -62,22 +82,56 @@ stop_prod() {
     # 改用 delete 來完全移除進程，而不只是 stop (暫停)
     pm2 delete build-backend 2>/dev/null
     pm2 delete build-frontend 2>/dev/null
+    
+    # 確保 PM2 釋放後沒有殘留
+    force_cleanup
+    
     echo -e "${GREEN}正式佈署已從 PM2 列表中移除。${NC}"
 }
 
 # ------------------------------------------
-# 主功能
+# 主功能與選單邏輯
 # ------------------------------------------
 
-case "$1" in
+# 如果沒有提供參數，顯示互動式選單
+if [ -z "$1" ]; then
+    echo "=========================================="
+    echo "  Build Verification System - 管理選單"
+    echo "=========================================="
+    echo "請輸入數字選擇要執行的指令:"
+    echo " 1. dev-start   : 啟動開發模式 (背景執行，寫入 logs/)"
+    echo " 2. dev-stop    : 停止開發模式"
+    echo " 3. prod-start  : 編譯並透過 PM2 啟動正式環境"
+    echo " 4. prod-stop   : 完全停止 PM2 正式環境"
+    echo " 5. restart     : 重啟 PM2 (正式環境用)"
+    echo " 6. status      : 查看目前運作狀態"
+    echo "=========================================="
+    read -p "請輸入選項 [1-6]: " choice
+    
+    case "$choice" in
+        1) ACTION="dev-start" ;;
+        2) ACTION="dev-stop" ;;
+        3) ACTION="prod-start" ;;
+        4) ACTION="prod-stop" ;;
+        5) ACTION="restart" ;;
+        6) ACTION="status" ;;
+        *) echo -e "${RED}無效的選項！請重新執行並輸入 1-6。${NC}"; exit 1 ;;
+    esac
+else
+    ACTION="$1"
+fi
+
+# 執行對應動作
+case "$ACTION" in
   dev-start)
     echo -e "${GREEN}=== 啟動開發模式 (Dev Mode) ===${NC}"
     
     # 1. 先嘗試停止可能存在的 PM2
-    stop_prod
+    pm2 stop build-backend 2>/dev/null
+    pm2 stop build-frontend 2>/dev/null
     
-    # 2. 檢查 Port
-    check_port
+    # 2. 強制清理幽靈程序 (取代原本的 check_port)
+    force_cleanup
     
     echo "啟動後端 (server.js)... Log: $DEV_BACKEND_LOG"
     nohup node server.js > "$DEV_BACKEND_LOG" 2>&1 &
@@ -104,7 +158,10 @@ case "$1" in
     # 1. 先停止開發模式
     stop_dev
     
-    # 2. 重新編譯前端
+    # 2. 強制清理幽靈程序
+    force_cleanup
+    
+    # 3. 重新編譯前端
     echo "正在編譯前端 (npm run build)..."
     npm run build
     
@@ -115,10 +172,9 @@ case "$1" in
         exit 1
     fi
 
-    # 3. 使用 PM2 啟動
+    # 4. 使用 PM2 啟動
     echo "啟動 PM2 服務..."
     
-    # 因為 stop_prod 現在是 delete，所以這裡直接 start 即可，但為了健壯性保留檢查
     if pm2 list | grep -q "build-backend"; then
         pm2 restart build-backend
     else
@@ -150,16 +206,23 @@ case "$1" in
     echo -e "\n${YELLOW}--- 開發模式 PIDs ---${NC}"
     if [ -f "$PID_DIR/backend.pid" ]; then echo "Dev Backend: Running (PID $(cat $PID_DIR/backend.pid))"; else echo "Dev Backend: Stopped"; fi
     if [ -f "$PID_DIR/frontend.pid" ]; then echo "Dev Frontend: Running (PID $(cat $PID_DIR/frontend.pid))"; else echo "Dev Frontend: Stopped"; fi
+    
+    echo -e "\n${YELLOW}--- Port 佔用情況 ---${NC}"
+    echo -n "Port 3001 (Backend): "
+    lsof -Pi :3001 -sTCP:LISTEN -t >/dev/null && echo -e "${RED}占用中${NC}" || echo -e "${GREEN}空閒${NC}"
+    echo -n "Port 5173 (Frontend): "
+    lsof -Pi :5173 -sTCP:LISTEN -t >/dev/null && echo -e "${RED}占用中${NC}" || echo -e "${GREEN}空閒${NC}"
     ;;
 
   *)
-    echo "使用方法: ./manage.sh [指令]"
+    echo "使用方法: ./manage.sh [指令] 或直接執行 ./manage.sh 開啟選單"
     echo "指令列表:"
-    echo "  dev-start   : 啟動開發模式 (背景執行，寫入 logs/)"
+    echo "  dev-start   : 啟動開發模式 (自動清除舊程序)"
     echo "  dev-stop    : 停止開發模式"
     echo "  prod-start  : 編譯並透過 PM2 啟動正式環境"
     echo "  prod-stop   : 完全停止 PM2 正式環境"
     echo "  restart     : 重啟 PM2 (正式環境用)"
-    echo "  status      : 查看目前運作狀態"
+    echo "  status      : 查看目前運作狀態與 Port 佔用"
+    exit 1
     ;;
 esac

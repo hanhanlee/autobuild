@@ -1,27 +1,34 @@
 [
   {
-    "id": "proj_default_1",
-    "name": "Example Project",
-    "description": "範例專案",
-    "commands": [
-      "echo \"Hello World\"",
-      "sleep 2",
-      "echo \"Done\""
+    "id": "proj_1764574092756",
+    "name": "ast2600",
+    "description": "2600evb test build",
+    "cloneCommands": [
+      "git clone --recurse-submodules https://git.ami.com.tw/core/lts/spx-13/evb/ast2600evb.git --branch LTS-v13",
+      "cd ast2600evb",
+      "git submodule foreach git checkout LTS-v13    ",
+      "git checkout LTS-v13",
+      "git pull origin LTS-v13"
+    ],
+    "buildCommands": [
+      "git spx buildsrc configs/ast2600evb.PRJ packages/ workspace_ast2600evb"
     ]
   },
   {
-    "id": "proj_1764574092756",
-    "name": "ast2600",
-    "description": "2600evb",
-    "commands": [
-      "git clone --recurse-submodules https://git.ami.com.tw/core/lts/spx-13/evb/ast2600evb.git --branch LTS-v13",
-      "pwd",
-      "cd ast2600evb",
-      "pwd",
-      "git submodule foreach git checkout LTS-v13    ",
-      "git checkout LTS-v13",
-      "git pull origin LTS-v13",
-      "git spx buildsrc configs/ast2600evb.PRJ packages/ workspace_ast2600evb"
+    "id": "proj_1764675847998",
+    "name": "eltsltsv12",
+    "description": "eltsast2500evb",
+    "cloneCommands": [
+      "git clone --recurse-submodules https://git.ami.com/core/lts/elts/spx-12-elts/evb/ast2500evb.git --branch LTS-v12",
+      "cd ast2500evb",
+      "git submodule foreach git checkout LTS-v12",
+      "git checkout LTS-v12",
+      "git pull origin LTS-v12",
+      "git checkout LTS-v12",
+      "git pull origin LTS-v12"
+    ],
+    "buildCommands": [
+      "git spx buildsrc configs/ast2500evb.PRJ packages/ workspace_ast2500evb"
     ]
   }
 ]
