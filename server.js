@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 
 // --- 版本號設定 ---
-const BACKEND_VERSION = 'v1.10 (Fix Workspace Record)';
+const BACKEND_VERSION = 'v1.11 (Advanced Cleanup)';
 
 dotenv.config();
 
@@ -131,7 +131,6 @@ app.delete('/api/projects/:id', (req, res) => {
 });
 
 app.get('/api/workspaces', (req, res) => {
-    console.log(`[API] Scanning workspaces in: ${BUILDS_DIR}`);
     if (!fs.existsSync(BUILDS_DIR)) return res.json([]);
     try {
         const dirs = fs.readdirSync(BUILDS_DIR).filter(f => {
@@ -152,40 +151,14 @@ app.get('/api/job/:id', (req, res) => {
     res.json(job);
 });
 
-// 修改：詳細路徑除錯 ROM 下載 API (強制 Headers)
 app.get('/api/job/:id/download/rom', (req, res) => {
     const job = jobs[req.params.id];
     if (!job) return res.status(404).send('Job not found');
-    
-    console.log(`[Download] Request for Job #${job.id}`);
+    if (!job.workspaceDir) return res.status(404).send('No workspace recorded');
 
-    // 嘗試修復舊資料：如果 workspaceDir 不存在但有 workspace 欄位 (舊版可能用這個名字)，則嘗試使用
-    if (!job.workspaceDir && job.workspace && job.workspace !== '(New)') {
-        console.log(`[Download] 'workspaceDir' missing, trying fallback to 'workspace': ${job.workspace}`);
-        job.workspaceDir = job.workspace;
-        // 嘗試存回，修正舊資料
-        saveJobs();
-    }
-
-    if (!job.workspaceDir) {
-        const msg = `Error: No 'workspaceDir' recorded for Job #${job.id}.\n` +
-                    `This job might have been created before the update or failed to initialize properly.\n\n` +
-                    `Job Data Dump:\n${JSON.stringify(job, null, 2)}`;
-        console.error(`[Download Error] ${msg}`);
-        return res.status(404).send(msg);
-    }
-
-    // Layer 1: Timestamp Directory
     const workspacePath = path.join(BUILDS_DIR, job.workspaceDir);
-    if (!fs.existsSync(workspacePath)) {
-        const msg = `Error: Workspace directory not found on server.\n` +
-                    `Looking for: ${workspacePath}\n` + 
-                    `This folder might have been deleted manually or via cleanup.`;
-        console.error(`[Download Error] ${msg}`);
-        return res.status(404).send(msg);
-    }
+    if (!fs.existsSync(workspacePath)) return res.status(404).send('Workspace not found');
 
-    // Layer 2: Repository Directory
     let repoDirName;
     try {
         const contents = fs.readdirSync(workspacePath);
@@ -193,72 +166,47 @@ app.get('/api/job/:id/download/rom', (req, res) => {
             const fullPath = path.join(workspacePath, f);
             return fs.statSync(fullPath).isDirectory() && !f.startsWith('.');
         });
-    } catch (e) { console.error("Error reading timestamp dir:", e); }
+    } catch (e) { console.error(e); }
 
-    if (!repoDirName) return res.status(404).send('Repository directory not found in workspace');
+    if (!repoDirName) return res.status(404).send('Repo dir not found');
     const repoDirPath = path.join(workspacePath, repoDirName);
     
-    // Layer 3: Search for ROM
     let foundRomPath = null;
-    let searchedPaths = [];
-
     try {
         const subDirs = fs.readdirSync(repoDirPath);
         for (const subDir of subDirs) {
-            const potentialWorkspacePath = path.join(repoDirPath, subDir);
-            if (!fs.statSync(potentialWorkspacePath).isDirectory()) continue;
-
-            const potentialRom = path.join(potentialWorkspacePath, 'Build', 'output', 'rom.ima');
-            searchedPaths.push(potentialRom);
-
+            const potentialRom = path.join(repoDirPath, subDir, 'Build', 'output', 'rom.ima');
             if (fs.existsSync(potentialRom)) {
                 foundRomPath = potentialRom;
                 break; 
             }
         }
-    } catch (e) { console.error("Error searching for workspace dir:", e); }
+    } catch (e) {}
 
     if (foundRomPath) {
-        console.log(`[Download] Sending ROM: ${foundRomPath}`);
-        
         const filename = `rom_${job.projectName}_${job.id}.ima`;
-        
-        // 關鍵修改：使用 sendFile 並明確設定 Header
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
         res.setHeader('Content-Type', 'application/octet-stream');
-        
-        res.sendFile(foundRomPath, (err) => {
-            if (err) {
-                console.error("Error sending file:", err);
-                if (!res.headersSent) res.status(500).send("Error downloading file");
-            }
-        });
+        res.sendFile(foundRomPath);
     } else {
-        const msg = `Error: 'rom.ima' not found.\nSearched paths:\n${searchedPaths.join('\n')}`;
-        console.log(`[Download Error] ${msg}`);
-        res.status(404).send(msg);
+        res.status(404).send(`rom.ima not found`);
     }
 });
 
 app.post('/api/build', (req, res) => {
     const { projectId, projectName, cloneCommands, buildCommands, notificationEmails, existingWorkspace } = req.body;
     const jobId = Math.floor(Math.random() * 100000).toString().padStart(5, '0');
-    
-    // 修正：確保初始化時就寫入 workspaceDir (如果是 Existing Workspace)
-    // 如果是 New Workspace，稍後在 runBuildProcess 會更新，但先給個初始值或 null
     const initialWorkspace = existingWorkspace ? path.basename(existingWorkspace) : null;
 
     jobs[jobId] = {
         id: jobId, projectId, projectName, status: 'pending', logs: [],
         startTime: new Date().toLocaleString(), notificationEmails,
-        workspaceDir: initialWorkspace, // 統一使用 workspaceDir 這個欄位名
-        workspace: existingWorkspace || '(New)' // 舊欄位保留給前端顯示用
+        workspaceDir: initialWorkspace,
+        workspace: existingWorkspace || '(New)'
     };
     saveJobs();
     
-    console.log(`[Job #${jobId}] Build initialized.`);
     res.json({ success: true, jobId, message: 'Build initialized' });
-    
     runBuildProcess(jobId, projectName, cloneCommands, buildCommands, notificationEmails, existingWorkspace);
 });
 
@@ -283,25 +231,45 @@ app.get('/api/system/status', async (req, res) => {
     res.json({ disk });
 });
 
+// 修改：支援 'specific', 'old' (with custom days), 'all'
 app.post('/api/cleanup', (req, res) => {
-    const { type } = req.body; 
+    const { type, days, target } = req.body; 
     const now = new Date();
-    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+    
+    // 計算天數閾值 (預設 7 天)
+    const daysThreshold = parseInt(days) || 7;
+    const MS_THRESHOLD = daysThreshold * 24 * 60 * 60 * 1000;
+    
     let deletedCount = 0;
+    let deletedFolders = 0;
 
     const newJobs = {};
+
+    // 1. 清理 Jobs 記錄 (如果是刪除特定資料夾，也要把相關 Job 刪掉)
     Object.keys(jobs).forEach(id => {
         const job = jobs[id];
         const jobTime = new Date(job.startTime);
         let shouldDelete = false;
-        if (type === 'all' && job.status !== 'processing') shouldDelete = true;
-        else if (type === 'old' && (now - jobTime) > SEVEN_DAYS_MS && job.status !== 'processing') shouldDelete = true;
-        
-        if (!shouldDelete) newJobs[id] = job; else deletedCount++;
+
+        if (job.status === 'processing') {
+            // 正在執行的不刪
+            shouldDelete = false;
+        } else if (type === 'all') {
+            shouldDelete = true;
+        } else if (type === 'old') {
+            if ((now - jobTime) > MS_THRESHOLD) shouldDelete = true;
+        } else if (type === 'specific' && target) {
+            // 如果 Job 的 workspaceDir 等於要刪除的目標，則移除紀錄
+            if (job.workspaceDir === target) shouldDelete = true;
+        }
+
+        if (!shouldDelete) newJobs[id] = job;
+        else deletedCount++;
     });
     jobs = newJobs; 
     saveJobs();
 
+    // 2. 清理實體資料夾
     if (fs.existsSync(BUILDS_DIR)) {
         const items = fs.readdirSync(BUILDS_DIR);
         items.forEach(item => {
@@ -309,13 +277,30 @@ app.post('/api/cleanup', (req, res) => {
             try {
                 const stats = fs.statSync(itemPath);
                 let shouldRemove = false;
-                if (type === 'all') shouldRemove = true;
-                else if (type === 'old' && (now - stats.mtime) > SEVEN_DAYS_MS) shouldRemove = true;
-                if (shouldRemove) fs.rmSync(itemPath, { recursive: true, force: true });
+
+                if (type === 'all') {
+                    shouldRemove = true;
+                } else if (type === 'old') {
+                    if ((now - stats.mtime) > MS_THRESHOLD) shouldRemove = true;
+                } else if (type === 'specific' && target) {
+                    if (item === target) shouldRemove = true;
+                }
+
+                if (shouldRemove) {
+                    // 安全檢查：只刪除 BUILDS_DIR 下的內容，且必須是目錄
+                    if (stats.isDirectory()) {
+                        fs.rmSync(itemPath, { recursive: true, force: true });
+                        deletedFolders++;
+                    }
+                }
             } catch (err) { console.error(`Failed to delete ${item}:`, err); }
         });
     }
-    res.json({ success: true, message: `Cleaned up ${deletedCount} job records.` });
+
+    res.json({ 
+        success: true, 
+        message: `清理完成。移除了 ${deletedCount} 筆紀錄，刪除了 ${deletedFolders} 個資料夾。` 
+    });
 });
 
 async function runBuildProcess(jobId, projectName, cloneCommands, buildCommands, emails, existingWorkspaceName = null) {
@@ -333,7 +318,7 @@ async function runBuildProcess(jobId, projectName, cloneCommands, buildCommands,
     };
 
     try {
-        log(`[System] Initializing build environment (Backend ${BACKEND_VERSION})...`);
+        log(`[System] Initializing build environment...`);
         
         if (existingWorkspaceName) {
             const safeName = path.basename(existingWorkspaceName);
@@ -350,9 +335,7 @@ async function runBuildProcess(jobId, projectName, cloneCommands, buildCommands,
             log(`[System] Created NEW workspace: ${buildDir}`);
         }
         
-        // 修正：確保 workspaceDir 在這裡被正確更新並存檔
         job.workspaceDir = workspaceName;
-        // 同步更新顯示用的 workspace 欄位
         job.workspace = workspaceName;
         saveJobs();
         

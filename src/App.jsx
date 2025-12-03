@@ -3,15 +3,15 @@ import {
   Play, Clock, CheckCircle, XCircle, Terminal, Loader2, RefreshCw, Trash2, Server, 
   Plus, X, Save, Pencil, Download, Mail, ChevronRight, ChevronLeft, AlertTriangle, Square, 
   Folder, HardDrive, GitBranch, Hammer, Repeat, RefreshCcw, Copy, FileDown, Code,
-  LayoutDashboard, Settings, Menu
+  LayoutDashboard, Settings, Menu, Activity
 } from 'lucide-react';
 
 // --- 全域設定 ---
-const FRONTEND_VERSION = 'v2.1 (Collapsible Sidebar)';
+const FRONTEND_VERSION = 'v2.2 (Separate System Tab)';
 const API_BASE_URL = `http://${window.location.hostname}:3001/api`;
 const IDE_BASE_URL = `http://${window.location.hostname}:8080`;
 
-// --- 共用組件 (保持不變) ---
+// --- 共用組件 ---
 
 const StatusBadge = ({ status }) => {
   const styles = {
@@ -66,32 +66,163 @@ const DiskUsageBar = ({ stats }) => {
 };
 
 // ==========================================
-// 1. 子系統：Build Verification (原有的功能)
+// 2. 新增：System Status Module (獨立頁面)
+// ==========================================
+const SystemStatusModule = () => {
+    const [diskStats, setDiskStats] = useState(null);
+    const [workspaces, setWorkspaces] = useState([]);
+    const [selectedDir, setSelectedDir] = useState('');
+    const [cleanupDays, setCleanupDays] = useState(7);
+
+    const fetchSystemStatus = async () => {
+        try {
+            const res = await fetch(`${API_BASE_URL}/system/status`);
+            if (res.ok) setDiskStats((await res.json()).disk);
+        } catch(e) { console.warn("Fetch disk status failed"); }
+    };
+
+    const fetchWorkspaces = async () => {
+        try {
+            const res = await fetch(`${API_BASE_URL}/workspaces`);
+            if (res.ok) setWorkspaces(await res.json());
+        } catch (e) { console.warn("Fetch workspaces failed"); }
+    };
+
+    useEffect(() => {
+        fetchSystemStatus();
+        fetchWorkspaces();
+    }, []);
+
+    const handleCleanup = async (type, param = null) => {
+        let confirmMsg = "";
+        let payload = { type };
+
+        if (type === 'specific') {
+            if (!selectedDir) { alert("請先選擇要清除的目錄"); return; }
+            confirmMsg = `確定要永久刪除目錄 "${selectedDir}" 嗎？此操作無法復原。`;
+            payload.target = selectedDir;
+        } else if (type === 'old') {
+            confirmMsg = `確定要刪除所有超過 ${cleanupDays} 天的舊檔案與任務紀錄嗎？`;
+            payload.days = cleanupDays;
+        } else if (type === 'all') {
+            confirmMsg = `⚠️ 警告：這將會刪除「所有」歷史任務與 Build 檔案。\n確定執行？`;
+        }
+
+        if (!window.confirm(confirmMsg)) return;
+
+        try {
+            const res = await fetch(`${API_BASE_URL}/cleanup`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (res.ok) {
+                const data = await res.json();
+                alert(data.message);
+                // Refresh data
+                fetchSystemStatus();
+                fetchWorkspaces();
+                setSelectedDir('');
+            } else {
+                alert("清理請求失敗");
+            }
+        } catch (e) { alert("連線錯誤"); }
+    };
+
+    return (
+        <div className="space-y-6 max-w-4xl mx-auto">
+            {/* 1. 硬碟狀態卡片 */}
+            <div className="bg-white rounded-xl shadow-sm border p-6">
+                <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center">
+                    <Activity className="w-5 h-5 mr-2 text-indigo-600"/> 硬碟健康狀態
+                </h3>
+                <div className="bg-slate-50 p-4 rounded-lg border">
+                    <DiskUsageBar stats={diskStats} />
+                </div>
+            </div>
+
+            {/* 2. 清理功能卡片 */}
+            <div className="bg-white rounded-xl shadow-sm border p-6">
+                <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center">
+                    <Trash2 className="w-5 h-5 mr-2 text-red-600"/> 磁碟清理工具
+                </h3>
+                
+                <div className="grid gap-6 md:grid-cols-3">
+                    {/* Option 1: 清除指定目錄 */}
+                    <div className="border rounded-lg p-4 flex flex-col space-y-3 bg-slate-50">
+                        <div className="font-semibold text-slate-700">1. 清除指定目錄</div>
+                        <p className="text-xs text-slate-500">手動選擇不需要的專案資料夾進行刪除。</p>
+                        <select 
+                            className="w-full border rounded p-2 text-sm"
+                            value={selectedDir}
+                            onChange={(e) => setSelectedDir(e.target.value)}
+                        >
+                            <option value="">-- 選擇目錄 --</option>
+                            {workspaces.map(w => (
+                                <option key={w.name} value={w.name}>{w.name}</option>
+                            ))}
+                        </select>
+                        <button 
+                            onClick={() => handleCleanup('specific')}
+                            className="w-full bg-white border border-slate-300 text-slate-700 py-2 rounded text-sm hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-colors"
+                        >
+                            刪除選定目錄
+                        </button>
+                    </div>
+
+                    {/* Option 2: 清理舊檔 */}
+                    <div className="border rounded-lg p-4 flex flex-col space-y-3 bg-slate-50">
+                        <div className="font-semibold text-slate-700">2. 自動清理舊檔</div>
+                        <p className="text-xs text-slate-500">刪除建立時間超過指定天數的資料。</p>
+                        <div className="flex items-center gap-2">
+                            <span className="text-sm text-slate-600">超過</span>
+                            <input 
+                                type="number" 
+                                min="1"
+                                className="w-16 border rounded p-1 text-center" 
+                                value={cleanupDays}
+                                onChange={(e) => setCleanupDays(e.target.value)}
+                            />
+                            <span className="text-sm text-slate-600">天</span>
+                        </div>
+                        <button 
+                            onClick={() => handleCleanup('old')}
+                            className="w-full bg-orange-100 text-orange-700 py-2 rounded text-sm hover:bg-orange-200 transition-colors mt-auto"
+                        >
+                            執行清理
+                        </button>
+                    </div>
+
+                    {/* Option 3: 清理全部 */}
+                    <div className="border rounded-lg p-4 flex flex-col space-y-3 bg-red-50 border-red-100">
+                        <div className="font-semibold text-red-800">3. 系統重置</div>
+                        <p className="text-xs text-red-600">危險操作：將刪除所有的 Build 紀錄與產出檔案。</p>
+                        <div className="flex-1"></div>
+                        <button 
+                            onClick={() => handleCleanup('all')}
+                            className="w-full bg-red-600 text-white py-2 rounded text-sm hover:bg-red-700 transition-colors shadow-sm"
+                        >
+                            清理全部資料
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+// ==========================================
+// 3. 子系統：Build Verification (移除舊有清理按鈕)
 // ==========================================
 const BuildVerificationModule = () => {
-  const MOCK_PROJECTS = [
-    {
-      id: 'mock_proj_1',
-      name: 'Demo_ECommerce_Web',
-      description: '範例電商平台 (Demo Mode)',
-      cloneCommands: ['echo "Cloning..."', 'git clone https://github.com/demo/ecommerce.git'],
-      buildCommands: ['npm install', 'npm run build']
-    },
-    {
-      id: 'mock_proj_2',
-      name: 'Demo_Backend_API',
-      description: '範例後端服務 (Demo Mode)',
-      cloneCommands: ['git clone https://github.com/demo/api.git'],
-      buildCommands: ['docker build -t api-service .']
-    }
-  ];
-
+  // ... (State 定義保持不變) ...
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [buildQueue, setBuildQueue] = useState([]);
   const [notificationEmails, setNotificationEmails] = useState('');
   const [serverError, setServerError] = useState(null);
-  const [diskStats, setDiskStats] = useState(null);
+  // diskStats 這裡還是保留，只是不顯示 UI 了，或者也可以移除 fetch
   
   const [activeTab, setActiveTab] = useState('new');
   const [workspaces, setWorkspaces] = useState([]);
@@ -153,14 +284,7 @@ const BuildVerificationModule = () => {
       } catch (e) { setWorkspaceError(e.message); }
   };
 
-  const fetchSystemStatus = async () => {
-      try {
-          const res = await fetch(`${API_BASE_URL}/system/status`);
-          if (res.ok) setDiskStats((await res.json()).disk);
-      } catch(e) { console.warn("Fetch disk status failed"); }
-  };
-
-  // Initialization & Polling
+  // Initialization
   useEffect(() => {
     const initData = async () => {
         try {
@@ -171,24 +295,19 @@ const BuildVerificationModule = () => {
             if (projs.length > 0 && !selectedProjectId) setSelectedProjectId(projs[0].id);
             setServerError(null);
             fetchJobs();
-            fetchSystemStatus();
             fetchWorkspaces();
         } catch (e) {
-            console.warn("Demo Mode:", e);
             setServerError(`無法連接後端 (${API_BASE_URL})`);
-            setProjects(MOCK_PROJECTS);
-            setSelectedProjectId(MOCK_PROJECTS[0].id);
-            setDiskStats({ total: 500 * 1024 * 1024 * 1024, used: 120 * 1024 * 1024 * 1024, percent: "24%" });
         }
     };
     initData();
   }, []);
 
+  // Polling
   useEffect(() => {
     if (serverError) return;
     const intervalId = setInterval(async () => {
       const activeJobs = buildQueue.filter(job => ['processing', 'pending'].includes(job.status));
-      if (new Date().getSeconds() % 5 === 0) fetchSystemStatus();
       if (activeJobs.length === 0) return;
       for (const job of activeJobs) {
         try {
@@ -213,12 +332,8 @@ const BuildVerificationModule = () => {
   const handleStartBuild = async () => {
     if (!selectedProject || !selectedProject.id) return;
     const emailList = notificationEmails.split(',').map(e => e.trim()).filter(e => e);
-    if (serverError) {
-        const mockJobId = `job_${Date.now()}`;
-        setBuildQueue(prev => [{ id: mockJobId, projectId: selectedProject.id, projectName: selectedProject.name, status: 'pending', startTime: new Date().toLocaleString(), logs: ['[Demo] Queueing...'], notificationEmails: emailList }, ...prev]);
-        setActiveJobId(mockJobId);
-        return;
-    }
+    if (serverError) return; // No demo mode in simplified version
+    
     let payload = {
         projectId: selectedProject.id, projectName: selectedProject.name, notificationEmails: emailList,
         cloneCommands: [], buildCommands: [], existingWorkspace: null
@@ -248,15 +363,12 @@ const BuildVerificationModule = () => {
       if (!window.confirm("確定中止？")) return;
       try { await fetch(`${API_BASE_URL}/job/${jobId}/cancel`, {method: 'POST'}); } catch(e) { alert("錯誤"); }
   };
-  const handleCleanup = async (type) => {
-      if(!window.confirm("確定清理？")) return;
-      try { await fetch(`${API_BASE_URL}/cleanup`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({type})}); fetchJobs(); fetchSystemStatus(); } catch(e) {}
-  };
+  
+  // CRUD
   const handleSaveProject = async (e) => {
       e.preventDefault();
       if(!newProjectForm.name) return;
       const pData = { id: isEditing ? selectedProjectId : `proj_${Date.now()}`, name: newProjectForm.name, description: newProjectForm.description, cloneCommands: newProjectForm.cloneCommands.split('\n').filter(l=>l.trim()), buildCommands: newProjectForm.buildCommands.split('\n').filter(l=>l.trim()) };
-      if (serverError) { setIsModalOpen(false); return; }
       try {
           const res = await fetch(`${API_BASE_URL}/projects`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(pData)});
           if(res.ok) { await fetchProjects(); if(!isEditing) setSelectedProjectId(pData.id); setIsModalOpen(false); setNewProjectForm({name:'',description:'',cloneCommands:'',buildCommands:''}); }
@@ -267,16 +379,14 @@ const BuildVerificationModule = () => {
       try { const res = await fetch(`${API_BASE_URL}/projects/${selectedProjectId}`, {method:'DELETE'}); if(res.ok) { await fetchProjects(); setSelectedProjectId(''); } } catch(e){}
   };
 
-  // View Logic Helpers
+  // Helpers
   const copyPath = () => { if(currentWorkspaceObj?.path) navigator.clipboard.writeText(currentWorkspaceObj.path); };
   const openIDE = () => { if(currentWorkspaceObj?.path) window.open(`vscode://vscode-remote/ssh-remote+scmbmc@${window.location.hostname}${currentWorkspaceObj.path}`, '_self'); };
   const dlLog = () => { if(viewingJob?.logs) { const blob=new Blob([viewingJob.logs.join('\n')],{type:'text/plain'}); const url=URL.createObjectURL(blob); const l=document.createElement('a'); l.href=url; l.download=`log_${viewingJob.id}.txt`; l.click(); }};
   const handleClearHistory = () => setBuildQueue([]); 
 
-  // --- Render Build Module ---
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 h-full">
-       {/* Modals & Error Bars */}
        {isModalOpen && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
            <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl p-6 flex flex-col max-h-[90vh]">
@@ -309,22 +419,7 @@ const BuildVerificationModule = () => {
         </div>
        )}
        
-       {/* Left Panel */}
        <div className="lg:col-span-1 space-y-6 overflow-y-auto pr-2">
-           {/* Status & Disk */}
-           <div className="bg-white rounded-xl shadow-sm border p-4 space-y-3">
-                <div className="flex justify-between items-center">
-                    <h3 className="font-semibold text-slate-700 text-sm">系統狀態</h3>
-                    <span className={`text-xs px-2 py-1 rounded ${serverError ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'}`}>{serverError ? 'Disconnected' : 'Connected'}</span>
-                </div>
-                <DiskUsageBar stats={diskStats} />
-                <div className="flex gap-2 pt-1">
-                   <button onClick={() => handleCleanup('old')} className="flex-1 bg-orange-50 text-orange-600 text-xs py-1 rounded hover:bg-orange-100">清舊檔</button>
-                   <button onClick={() => handleCleanup('all')} className="flex-1 bg-red-50 text-red-600 text-xs py-1 rounded hover:bg-red-100">清全部</button>
-                </div>
-           </div>
-
-           {/* Control Panel */}
            <div className="bg-white rounded-xl shadow-sm border overflow-hidden">
                <div className="flex border-b">
                    <button onClick={()=>{setActiveTab('new');setRunCloneStage(true);setRunBuildStage(true)}} className={`flex-1 py-3 text-sm font-medium ${activeTab==='new'?'text-indigo-600 border-b-2 border-indigo-600':'text-slate-500'}`}>新 Build</button>
@@ -374,7 +469,6 @@ const BuildVerificationModule = () => {
            </div>
        </div>
 
-       {/* Right Panel (Log) */}
        <div className="lg:col-span-2 bg-slate-900 rounded-xl shadow-lg border border-slate-700 flex flex-col h-[calc(100vh-4rem)]">
            <div className="bg-slate-800 p-3 border-b border-slate-700 flex justify-between items-center text-slate-300 text-sm">
                <div className="flex items-center gap-2"><Terminal className="w-4 h-4"/> Console: {viewingJob?.id ? `#${viewingJob.id}` : 'Waiting...'}</div>
@@ -400,25 +494,21 @@ const BuildVerificationModule = () => {
 };
 
 // ==========================================
-// 3. 主框架：App Shell (Sidebar + Routing)
+// 3. 主框架：App Shell
 // ==========================================
-const StatusBadgeComponent = ({ status }) => { /* Reused inside BuildModule */ return null; } // Dummy to avoid lint errors if moved
-
 export default function App() {
-  const [currentView, setCurrentView] = useState('build'); // 'build' | 'cve' | 'query' | 'settings'
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true); // Sidebar collapse state
+  const [currentView, setCurrentView] = useState('build'); 
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true); 
 
   const MENU_ITEMS = [
     { id: 'build', label: 'Build 驗證', icon: LayoutDashboard },
-    // { id: 'query', label: '系統查詢', icon: Search },
-    // { id: 'cve',   label: 'CVE 分析',   icon: ShieldAlert },
+    { id: 'system', label: '系統狀態', icon: Activity }, // 使用 Activity icon 代表系統狀態
   ];
 
   return (
     <div className="flex h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden">
       {/* Sidebar */}
       <aside className={`bg-slate-900 text-slate-300 flex flex-col shrink-0 transition-all duration-300 ${isSidebarOpen ? 'w-64' : 'w-20'}`}>
-        {/* Sidebar Header */}
         <div className={`h-16 flex items-center ${isSidebarOpen ? 'px-6 justify-between' : 'justify-center'} border-b border-slate-800`}>
           {isSidebarOpen ? (
             <>
@@ -472,7 +562,6 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col min-w-0 bg-slate-100">
-        {/* Top Bar */}
         <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 shrink-0">
             <h2 className="text-xl font-bold text-slate-800">
                 {MENU_ITEMS.find(i => i.id === currentView)?.label}
@@ -484,10 +573,10 @@ export default function App() {
             </div>
         </header>
 
-        {/* Content View */}
         <div className="flex-1 overflow-hidden p-6 relative">
             <div className="absolute inset-0 p-6 overflow-auto">
                 {currentView === 'build' && <BuildVerificationModule />}
+                {currentView === 'system' && <SystemStatusModule />}
             </div>
         </div>
       </main>
